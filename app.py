@@ -39,7 +39,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Title
-st.markdown('<h1 class="main-header">🏃 EcoVerse Activity & Safety Monitor</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">🏃 Activity Recognition & Motion-Based Safety Monitoring System</h1>', unsafe_allow_html=True)
 
 # Check for required files
 model_exists = Path("activity_model.pkl").exists()
@@ -70,7 +70,7 @@ with st.sidebar:
     mode = st.radio("Select Mode:", available_modes)
     
     st.divider()
-    st.info("**EcoVerse** monitors human activities and detects safety risks in real-time.")
+    st.info("This system monitors human activities and detects safety risks in real-time using advanced ML algorithms.")
     
     # Statistics
     if log_exists:
@@ -411,7 +411,7 @@ elif mode == "📈 Dataset Explorer":
 st.divider()
 st.markdown("""
 <div style='text-align: center; color: #666; padding: 2rem 0;'>
-    <p><strong>EcoVerse Activity & Safety Monitor</strong></p>
+    <p><strong>Activity Recognition & Motion-Based Safety Monitoring System</strong></p>
     <p>Powered by Machine Learning | Real-time Activity Recognition & Fall Detection</p>
 </div>
 """, unsafe_allow_html=True)
