@@ -15,6 +15,12 @@ if 'current_session_samples' not in st.session_state:
 if 'simulation_completed' not in st.session_state:
     st.session_state.simulation_completed = False
 
+# Initialize session state for Health Trend Dashboard (accumulates across all sessions)
+if 'health_history' not in st.session_state:
+    st.session_state.health_history = pd.DataFrame()
+if 'simulation_active' not in st.session_state:
+    st.session_state.simulation_active = False
+
 # Page configuration
 st.set_page_config(
     page_title= "Activity & Safety Monitor",
@@ -74,6 +80,9 @@ with st.sidebar:
     
     # Alert system is always available
     available_modes.append("🚨 Safety Alert System")
+    
+    # Health Trend Dashboard is always available
+    available_modes.append("📅 Health Trend Dashboard")
     
     if not available_modes:
         st.error("No data sources available!")
@@ -471,6 +480,21 @@ elif mode == "🔴 Live Simulation":
                 # Save critical alerts to log immediately
                 if current_alert and current_alert['severity'] in ['CRITICAL', 'EMERGENCY']:
                     alert_system.save_alert_to_log(current_alert)
+            
+            # Append to Health Trend Dashboard history
+            health_entry = pd.DataFrame([{
+                'timestamp': pd.Timestamp.now(),
+                'activity': activity,
+                'risk': risk,
+                'motion': motion,
+                'fall': is_fall,
+                'alert': is_alert,
+                'anomaly': is_anomaly
+            }])
+            st.session_state.health_history = pd.concat(
+                [st.session_state.health_history, health_entry], 
+                ignore_index=True
+            )
             
             # Display metrics
             with placeholder_metrics.container():
@@ -1011,6 +1035,370 @@ elif mode == "🚨 Safety Alert System":
         with col4:
             remaining = max(0, CRITICAL_THRESHOLD - critical_percentage)
             st.metric("Margin", f"{remaining:.2f}%")
+
+
+# ====================================
+# MODE 5: HEALTH TREND DASHBOARD
+# ====================================
+elif mode == "📅 Health Trend Dashboard":
+    st.header("📅 Health Trend Dashboard")
+    st.subheader("Cumulative Health Analytics Across All Simulations")
+    
+    # Check if there's any health history data
+    if st.session_state.health_history.empty:
+        st.info("📝 No health trend data available yet. Run a Live Simulation to start collecting health metrics.")
+        
+        st.markdown("""
+        ### How to Start Tracking:
+        
+        1. Go to **🔴 Live Simulation** mode
+        2. Run a simulation (alerts can be enabled or disabled)
+        3. Return here to see cumulative health trends
+        
+        The dashboard will track:
+        - 📊 Risk trends over time
+        - 🚨 Fall events timeline
+        - ⚠️ Alert frequency
+        - 🏃 Activity distribution
+        - 💪 Fatigue and overactivity patterns
+        """)
+    else:
+        df_health = st.session_state.health_history
+        
+        # ====================================
+        # TOP SUMMARY CARDS
+        # ====================================
+        st.subheader("📊 Overall Health Summary")
+        
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
+        
+        with col1:
+            total_samples = len(df_health)
+            st.metric("📍 Total Samples", total_samples)
+        
+        with col2:
+            total_falls = df_health['fall'].sum() if 'fall' in df_health.columns else 0
+            st.metric("🚨 Total Falls", int(total_falls))
+        
+        with col3:
+            highest_risk = df_health['risk'].max() if 'risk' in df_health.columns and len(df_health) > 0 else 0
+            st.metric("⚡ Highest Risk", f"{int(highest_risk)}/100")
+        
+        with col4:
+            avg_risk = df_health['risk'].mean() if 'risk' in df_health.columns and len(df_health) > 0 else 0
+            st.metric("📈 Avg Risk", f"{avg_risk:.1f}/100")
+        
+        with col5:
+            total_alerts = df_health['alert'].sum() if 'alert' in df_health.columns else 0
+            st.metric("⚠️ High-Risk Alerts", int(total_alerts))
+        
+        with col6:
+            total_anomalies = df_health['anomaly'].sum() if 'anomaly' in df_health.columns else 0
+            st.metric("🔎 Anomalies", int(total_anomalies))
+        
+        st.divider()
+        
+        # ====================================
+        # TRENDS SECTION
+        # ====================================
+        st.subheader("📈 Live Trend Analytics")
+        
+        # 1️⃣ Risk Trend Over Time
+        st.markdown("#### 1️⃣ Risk Trend Over Time")
+        
+        fig1, ax1 = plt.subplots(figsize=(12, 5))
+        
+        if 'risk' in df_health.columns and len(df_health) > 0:
+            # Plot risk as line chart
+            ax1.plot(range(len(df_health)), df_health['risk'], 
+                    color='#667eea', linewidth=2, label='Risk Score')
+            
+            # Highlight critical spikes (risk > 75)
+            critical_indices = df_health[df_health['risk'] > 75].index
+            if len(critical_indices) > 0:
+                ax1.scatter(critical_indices, df_health.loc[critical_indices, 'risk'], 
+                           color='red', s=100, zorder=5, label='Critical Spikes', marker='X')
+            
+            # Add threshold lines
+            ax1.axhline(y=30, color='green', linestyle='--', alpha=0.5, label='Low Risk')
+            ax1.axhline(y=60, color='orange', linestyle='--', alpha=0.5, label='Medium Risk')
+            ax1.axhline(y=85, color='red', linestyle='--', alpha=0.5, label='High Risk')
+            
+            ax1.set_xlabel('Sample Index', fontsize=12)
+            ax1.set_ylabel('Risk Score', fontsize=12)
+            ax1.set_title('Risk Score Evolution', fontsize=14, fontweight='bold')
+            ax1.legend(loc='upper right')
+            ax1.grid(True, alpha=0.3)
+            ax1.set_ylim(0, 100)
+            
+            st.pyplot(fig1)
+        else:
+            st.info("No risk data available yet")
+        
+        st.divider()
+        
+        # 2️⃣ Fall Trend Timeline
+        st.markdown("#### 2️⃣ Fall Event Timeline")
+        
+        if 'fall' in df_health.columns:
+            fall_events = df_health[df_health['fall'] == True]
+            
+            fig2, ax2 = plt.subplots(figsize=(12, 3))
+            
+            # Plot all samples as background
+            ax2.scatter(range(len(df_health)), [0.5] * len(df_health), 
+                       color='lightgray', s=10, alpha=0.3, label='Normal')
+            
+            # Mark fall events
+            if len(fall_events) > 0:
+                ax2.scatter(fall_events.index, [0.5] * len(fall_events), 
+                           color='red', s=200, marker='X', zorder=5, label='Fall Detected')
+                st.metric("🚨 Fall Event Count", len(fall_events))
+            else:
+                st.success("✅ No fall events detected across all simulations!")
+            
+            ax2.set_xlabel('Sample Index', fontsize=12)
+            ax2.set_title('Fall Events Across All Simulations', fontsize=14, fontweight='bold')
+            ax2.set_ylim(0, 1)
+            ax2.set_yticks([0.5])
+            ax2.set_yticklabels(['Timeline'])
+            ax2.legend(loc='upper right')
+            ax2.grid(True, alpha=0.3, axis='x')
+            
+            st.pyplot(fig2)
+        else:
+            st.info("No fall data available")
+        
+        st.divider()
+        
+        # 3️⃣ Alert Frequency Chart
+        st.markdown("#### 3️⃣ Alert Frequency Over Time")
+        
+        col_left, col_right = st.columns(2)
+        
+        with col_left:
+            # Calculate alert counts
+            alert_summary = {
+                'INFO': 0,
+                'WARNING': 0,
+                'CRITICAL': 0,
+                'EMERGENCY': 0
+            }
+            
+            for idx, row in df_health.iterrows():
+                if row.get('fall', False):
+                    alert_summary['EMERGENCY'] += 1
+                elif row.get('alert', False):
+                    alert_summary['CRITICAL'] += 1
+                elif row.get('anomaly', False):
+                    alert_summary['WARNING'] += 1
+                elif row.get('risk', 0) >= 60:
+                    alert_summary['INFO'] += 1
+            
+            fig3, ax3 = plt.subplots(figsize=(8, 5))
+            
+            colors_map = {
+                'INFO': '#3b82f6',
+                'WARNING': '#f59e0b',
+                'CRITICAL': '#ef4444',
+                'EMERGENCY': '#991b1b'
+            }
+            
+            severities = list(alert_summary.keys())
+            counts = list(alert_summary.values())
+            bar_colors = [colors_map[s] for s in severities]
+            
+            bars = ax3.bar(severities, counts, color=bar_colors, edgecolor='black', linewidth=1.5)
+            
+            # Add value labels
+            for bar in bars:
+                height = bar.get_height()
+                ax3.text(bar.get_x() + bar.get_width()/2., height,
+                        f'{int(height)}',
+                        ha='center', va='bottom', fontsize=12, fontweight='bold')
+            
+            ax3.set_xlabel('Alert Severity', fontsize=12)
+            ax3.set_ylabel('Count', fontsize=12)
+            ax3.set_title('Cumulative Alert Distribution', fontsize=14, fontweight='bold')
+            ax3.grid(True, alpha=0.3, axis='y')
+            
+            st.pyplot(fig3)
+        
+        with col_right:
+            st.markdown("**Alert Summary Statistics:**")
+            total_alerts_all = sum(alert_summary.values())
+            
+            for severity, count in alert_summary.items():
+                percentage = (count / total_alerts_all * 100) if total_alerts_all > 0 else 0
+                st.metric(f"{severity} Alerts", count, f"{percentage:.1f}%")
+        
+        st.divider()
+        
+        # 4️⃣ Activity Distribution
+        st.markdown("#### 4️⃣ Activity Distribution")
+        
+        if 'activity' in df_health.columns:
+            activity_counts = df_health['activity'].value_counts()
+            
+            col_chart, col_table = st.columns([2, 1])
+            
+            with col_chart:
+                fig4, ax4 = plt.subplots(figsize=(10, 6))
+                
+                # Create pie chart
+                colors = plt.cm.Set3(range(len(activity_counts)))
+                wedges, texts, autotexts = ax4.pie(
+                    activity_counts.values, 
+                    labels=activity_counts.index,
+                    autopct='%1.1f%%',
+                    colors=colors,
+                    startangle=90
+                )
+                
+                # Enhance text
+                for autotext in autotexts:
+                    autotext.set_color('white')
+                    autotext.set_fontweight('bold')
+                
+                ax4.set_title('Activity Distribution Across All Simulations', 
+                             fontsize=14, fontweight='bold')
+                
+                st.pyplot(fig4)
+            
+            with col_table:
+                st.markdown("**Activity Breakdown:**")
+                activity_df = pd.DataFrame({
+                    'Activity': activity_counts.index,
+                    'Count': activity_counts.values,
+                    'Percentage': (activity_counts.values / activity_counts.sum() * 100).round(1)
+                })
+                st.dataframe(activity_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No activity data available")
+        
+        st.divider()
+        
+        # ====================================
+        # FATIGUE / OVERACTIVITY INSIGHT
+        # ====================================
+        st.subheader("💪 Fatigue & Activity Insights")
+        
+        # Rolling window analysis (last 50 samples)
+        window_size = min(50, len(df_health))
+        
+        if len(df_health) >= 10:
+            recent_data = df_health.tail(window_size)
+            
+            # Check for rising motion + risk trend
+            if 'motion' in recent_data.columns and 'risk' in recent_data.columns:
+                motion_trend = recent_data['motion'].rolling(window=10, min_periods=5).mean()
+                risk_trend = recent_data['risk'].rolling(window=10, min_periods=5).mean()
+                
+                # Check if both are rising
+                motion_rising = motion_trend.iloc[-1] > motion_trend.iloc[0] if len(motion_trend) >= 2 else False
+                risk_rising = risk_trend.iloc[-1] > risk_trend.iloc[0] if len(risk_trend) >= 2 else False
+                high_values = recent_data['motion'].mean() > df_health['motion'].mean() * 1.2
+                
+                if motion_rising and risk_rising and high_values:
+                    st.warning("⚠️ **Possible Fatigue / Overexertion Detected**")
+                    st.markdown("""
+                    Recent samples show:
+                    - Increasing motion intensity
+                    - Rising risk scores
+                    - Above-average activity levels
+                    
+                    **Recommendation:** Consider reducing activity intensity and taking rest breaks.
+                    """)
+                
+                # Check for extended inactivity
+                avg_motion = recent_data['motion'].mean()
+                overall_avg = df_health['motion'].mean()
+                
+                if avg_motion < overall_avg * 0.5 and len(recent_data) >= 30:
+                    st.info("ℹ️ **Extended Inactivity Detected**")
+                    st.markdown(f"""
+                    Last {window_size} samples show significantly reduced motion:
+                    - Current average motion: {avg_motion:.3f}
+                    - Overall average motion: {overall_avg:.3f}
+                    
+                    **Note:** Extended periods of low activity detected.
+                    """)
+                
+                # Show trends chart
+                fig5, (ax5a, ax5b) = plt.subplots(1, 2, figsize=(14, 4))
+                
+                # Motion trend
+                ax5a.plot(range(len(recent_data)), recent_data['motion'], 
+                         color='#8b5cf6', alpha=0.6, label='Motion')
+                ax5a.plot(range(len(motion_trend)), motion_trend, 
+                         color='#6366f1', linewidth=3, label='Trend')
+                ax5a.set_xlabel('Recent Sample Index')
+                ax5a.set_ylabel('Motion Magnitude')
+                ax5a.set_title(f'Motion Trend (Last {window_size} Samples)')
+                ax5a.legend()
+                ax5a.grid(True, alpha=0.3)
+                
+                # Risk trend
+                ax5b.plot(range(len(recent_data)), recent_data['risk'], 
+                         color='#f59e0b', alpha=0.6, label='Risk')
+                ax5b.plot(range(len(risk_trend)), risk_trend, 
+                         color='#ef4444', linewidth=3, label='Trend')
+                ax5b.set_xlabel('Recent Sample Index')
+                ax5b.set_ylabel('Risk Score')
+                ax5b.set_title(f'Risk Trend (Last {window_size} Samples)')
+                ax5b.legend()
+                ax5b.grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                st.pyplot(fig5)
+            else:
+                st.info("Not enough data for trend analysis yet")
+        else:
+            st.info("Collect more samples (at least 10) for fatigue analysis")
+        
+        st.divider()
+        
+        # ====================================
+        # PERSISTENCE - SAVE HEALTH TREND LOG
+        # ====================================
+        st.subheader("💾 Export Health Trend Data")
+        
+        col_save1, col_save2, col_save3 = st.columns(3)
+        
+        with col_save1:
+            if st.button("💾 Save Health Trend Log", use_container_width=True):
+                filename = "health_trend_log.csv"
+                df_health.to_csv(filename, index=False)
+                st.success(f"✅ Saved {len(df_health)} records to {filename}")
+        
+        with col_save2:
+            if st.button("📥 Download Health Trend CSV", use_container_width=True):
+                csv = df_health.to_csv(index=False)
+                st.download_button(
+                    label="Download CSV",
+                    data=csv,
+                    file_name=f"health_trend_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+        
+        with col_save3:
+            if st.button("🗑️ Clear Health History", use_container_width=True, type="secondary"):
+                if st.session_state.get('confirm_clear', False):
+                    st.session_state.health_history = pd.DataFrame()
+                    st.session_state.confirm_clear = False
+                    st.success("✅ Health history cleared!")
+                    st.rerun()
+                else:
+                    st.session_state.confirm_clear = True
+                    st.warning("⚠️ Click again to confirm clearing all health trend data!")
+        
+        # Data summary
+        st.markdown(f"""
+        **Current Health Trend Database:**
+        - Total Samples: {len(df_health)}
+        - Date Range: {df_health['timestamp'].min()} to {df_health['timestamp'].max()}
+        - Data Size: {df_health.memory_usage(deep=True).sum() / 1024:.2f} KB
+        """)
 
 
 
