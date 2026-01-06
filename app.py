@@ -7,6 +7,14 @@ import os
 from pathlib import Path
 from alert_system import SafetyAlertSystem, format_alert_message
 
+# Initialize session state for current simulation alerts
+if 'current_session_alerts' not in st.session_state:
+    st.session_state.current_session_alerts = []
+if 'current_session_samples' not in st.session_state:
+    st.session_state.current_session_samples = 0
+if 'simulation_completed' not in st.session_state:
+    st.session_state.simulation_completed = False
+
 # Page configuration
 st.set_page_config(
     page_title= "Activity & Safety Monitor",
@@ -127,7 +135,7 @@ if mode == "📊 Historical Dashboard":
             risk_counts = log["risk_level"].value_counts()
             fig_risk, ax_risk = plt.subplots(figsize=(6, 4))
             colors = {'Low': '#10b981', 'Medium': '#f59e0b', 'High': '#ef4444'}
-            ax_risk.bar(risk_counts.index, risk_counts.values, 
+            ax_risk.bar(risk_counts.index, risk_counts.values.astype(int), 
                        color=[colors.get(x, '#6366f1') for x in risk_counts.index])
             ax_risk.set_xlabel('Risk Level')
             ax_risk.set_ylabel('Count')
@@ -229,7 +237,7 @@ if mode == "📊 Historical Dashboard":
             ax1.set_xlabel('Sample Index')
             ax1.set_ylabel('Event')
             ax1.set_title(f'Fall Events in First {viz_range} Samples')
-            ax1.set_ylim([0, 1])
+            ax1.set_ylim(0, 1)
             ax1.set_yticks([0.5])
             ax1.set_yticklabels(['Activity Stream'])
             ax1.legend(loc='upper right')
@@ -249,7 +257,7 @@ if mode == "📊 Historical Dashboard":
                 colors = {'Low': '#10b981', 'Medium': '#f59e0b', 'High': '#ef4444'}
                 bar_colors = [colors.get(level, '#6366f1') for level in risk_counts.index]
                 
-                bars = ax2.bar(risk_counts.index, risk_counts.values, color=bar_colors, edgecolor='black', linewidth=1.5)
+                bars = ax2.bar(risk_counts.index, risk_counts.values.astype(int), color=bar_colors, edgecolor='black', linewidth=1.5)
                 
                 # Add value labels on bars
                 for bar in bars:
@@ -343,11 +351,52 @@ elif mode == "🔴 Live Simulation":
     df["Possible_Fall"] = df["acc_mag"] > threshold
     df["High_Risk_Alert"] = df["acc_mag"] > alert_threshold
     
-    # Fall pattern detection
-    df["Fall_Event"] = False
-    for i in range(1, len(df)-1):
-        if df["Possible_Fall"].iloc[i] and df["acc_mag"].iloc[i+1] < mean_mag:
-            df.loc[i, "Fall_Event"] = True
+    # Fall detection using supervised model from fall_detection.ipynb
+    fall_model_path = "fall_detection_model.pkl" if Path("fall_detection_model.pkl").exists() else None
+    
+    if fall_model_path and Path(fall_model_path).exists():
+        try:
+            # Load the trained fall detection model
+            fall_model = joblib.load(fall_model_path)
+            
+            # Extract features for fall detection (using same features as training)
+            FEATURE_COLS = [
+                "tBodyAcc-mean()-X", "tBodyAcc-mean()-Y", "tBodyAcc-mean()-Z",
+                "tBodyAcc-std()-X", "tBodyAcc-std()-Y", "tBodyAcc-std()-Z",
+                "tBodyAcc-max()-X", "tBodyAcc-max()-Y", "tBodyAcc-max()-Z",
+                "tBodyAcc-min()-X", "tBodyAcc-min()-Y", "tBodyAcc-min()-Z",
+                "tGravityAcc-mean()-X", "tGravityAcc-mean()-Y", "tGravityAcc-mean()-Z"
+            ]
+            
+            # Use available features that match the model's training features
+            available_cols = [col for col in FEATURE_COLS if col in df.columns]
+            
+            if available_cols:
+                X_fall = df[available_cols].values
+                df["Fall_Event"] = fall_model.predict(X_fall).astype(bool)
+                st.success("✅ Using supervised fall detection model from fall_detection.ipynb")
+            else:
+                # Fallback to heuristic if features not available
+                df["Fall_Event"] = False
+                for i in range(1, len(df)-1):
+                    if df["Possible_Fall"].iloc[i] and df["acc_mag"].iloc[i+1] < mean_mag:
+                        df.loc[i, "Fall_Event"] = True
+                st.warning("⚠️ Required features not available, using heuristic fall detection")
+                
+        except Exception as e:
+            # Fallback to motion-based heuristic if model fails
+            st.warning(f"⚠️ Could not load fall model ({e}), using heuristic detection")
+            df["Fall_Event"] = False
+            for i in range(1, len(df)-1):
+                if df["Possible_Fall"].iloc[i] and df["acc_mag"].iloc[i+1] < mean_mag:
+                    df.loc[i, "Fall_Event"] = True
+    else:
+        # Fallback to motion-based heuristic
+        st.info("ℹ️ Supervised fall detection model not found, using motion-based heuristic")
+        df["Fall_Event"] = False
+        for i in range(1, len(df)-1):
+            if df["Possible_Fall"].iloc[i] and df["acc_mag"].iloc[i+1] < mean_mag:
+                df.loc[i, "Fall_Event"] = True
     
     # Control panel
     col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
@@ -368,6 +417,11 @@ elif mode == "🔴 Live Simulation":
     
     # Live monitoring placeholder
     if start_simulation:
+        # Clear previous session data when starting new simulation
+        st.session_state.current_session_alerts = []
+        st.session_state.current_session_samples = 0
+        st.session_state.simulation_completed = False
+        
         st.subheader("🎯 Live Monitoring")
         
         # Placeholders
@@ -409,6 +463,10 @@ elif mode == "🔴 Live Simulation":
                     is_high_alert=is_alert,
                     sample_index=i
                 )
+                
+                # Store alert in session state for later viewing
+                if current_alert:
+                    st.session_state.current_session_alerts.append(current_alert)
                 
                 # Save critical alerts to log immediately
                 if current_alert and current_alert['severity'] in ['CRITICAL', 'EMERGENCY']:
@@ -456,6 +514,10 @@ elif mode == "🔴 Live Simulation":
             
             time.sleep(simulation_speed)
             i += 1
+        
+        # Mark simulation as completed and store sample count
+        st.session_state.simulation_completed = True
+        st.session_state.current_session_samples = max_samples
         
         st.success("✅ Simulation completed!")
         
@@ -561,8 +623,8 @@ elif mode == "🔴 Live Simulation":
     with col_a:
         activity_df = pd.DataFrame({
             'Activity': activity_dist.index,
-            'Count': activity_dist.values,
-            'Percentage': (activity_dist.values / len(simulated_data) * 100).round(2)
+            'Count': activity_dist.values.astype(int),
+            'Percentage': (activity_dist.values.astype(float) / len(simulated_data) * 100).round(2)
         })
         st.dataframe(activity_df, use_container_width=True, hide_index=True)
     
@@ -613,7 +675,7 @@ elif mode == "📈 Dataset Explorer":
             activity_counts = df["Activity"].value_counts()
             
             fig, ax = plt.subplots(figsize=(10, 5))
-            ax.bar(activity_counts.index, activity_counts.values, color='#667eea')
+            ax.bar(activity_counts.index, activity_counts.values.astype(int), color='#667eea')
             ax.set_xlabel('Activity Type')
             ax.set_ylabel('Count')
             ax.set_title('Distribution of Activities in Dataset')
@@ -635,13 +697,14 @@ elif mode == "📈 Dataset Explorer":
 # ====================================
 elif mode == "🚨 Safety Alert System":
     st.header("🚨 Safety Alert Management System")
+    st.subheader("Current Session Alerts")
     
     # Initialize alert system
     alert_system = SafetyAlertSystem()
     
-    # Check if alert log exists
-    if not Path(alert_system.alert_log_file).exists():
-        st.info("📝 No alert log found. Run a simulation with alerts enabled to generate safety alerts.")
+    # Check if there are alerts from current simulation session
+    if not st.session_state.simulation_completed or len(st.session_state.current_session_alerts) == 0:
+        st.info("📝 No alerts from current simulation session. Run a simulation with alerts enabled to generate safety alerts.")
         
         st.markdown("""
         ### How to Generate Alerts:
@@ -649,8 +712,7 @@ elif mode == "🚨 Safety Alert System":
         1. Go to **🔴 Live Simulation** mode
         2. Enable the **🚨 Enable Alerts** checkbox
         3. Run the simulation
-        4. Critical alerts will be logged automatically
-        5. Save additional alerts using the "Save All Alerts to Log" button
+        4. Return to this **Safety Alert System** to view the alerts from your simulation
         
         The system will detect and alert for:
         - 🚨 **EMERGENCY**: Fall events
@@ -658,162 +720,298 @@ elif mode == "🚨 Safety Alert System":
         - ⚠️ **WARNING**: Anomalies and high-risk activities
         - ℹ️ **INFO**: Elevated risk levels
         """)
-    else:
-        # Load alert statistics
-        stats = alert_system.get_alert_statistics()
         
-        if stats and stats['total_alerts'] > 0:
-            # Top metrics
-            st.subheader("📊 Overview")
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric("📢 Total Alerts", stats['total_alerts'])
-            
-            with col2:
-                st.metric("🚨 Emergencies", stats['emergency_count'])
-            
-            with col3:
-                st.metric("🔴 Critical", stats['critical_count'])
-            
-            with col4:
-                st.metric("⚡ Avg Risk", f"{stats['average_risk_score']:.1f}/100")
-            
-            st.divider()
-            
-            # Visualizations
-            col_left, col_right = st.columns(2)
-            
-            with col_left:
-                st.subheader("📊 Alerts by Severity")
-                
-                severity_data = pd.DataFrame({
-                    'Severity': list(stats['severity_breakdown'].keys()),
-                    'Count': list(stats['severity_breakdown'].values())
-                })
-                
-                fig1, ax1 = plt.subplots(figsize=(8, 5))
-                
-                colors_map = {
-                    'INFO': '#3b82f6',
-                    'WARNING': '#f59e0b',
-                    'CRITICAL': '#ef4444',
-                    'EMERGENCY': '#991b1b'
-                }
-                
-                bar_colors = [colors_map.get(s, '#6b7280') for s in severity_data['Severity']]
-                bars = ax1.bar(severity_data['Severity'], severity_data['Count'], 
-                              color=bar_colors, edgecolor='black', linewidth=1.5)
-                
-                for bar in bars:
-                    height = bar.get_height()
-                    ax1.text(bar.get_x() + bar.get_width()/2., height,
-                            f'{int(height)}',
-                            ha='center', va='bottom', fontsize=12, fontweight='bold')
-                
-                ax1.set_xlabel('Severity Level', fontsize=12)
-                ax1.set_ylabel('Count', fontsize=12)
-                ax1.set_title('Alert Distribution by Severity', fontsize=14, fontweight='bold')
-                ax1.grid(True, alpha=0.3, axis='y')
-                plt.xticks(rotation=0)
-                
-                st.pyplot(fig1)
-            
-            with col_right:
-                st.subheader("🎯 Alerts by Activity")
-                
-                activity_data = pd.DataFrame({
-                    'Activity': list(stats['activity_breakdown'].keys()),
-                    'Count': list(stats['activity_breakdown'].values())
-                }).sort_values('Count', ascending=False).head(10)
-                
-                fig2, ax2 = plt.subplots(figsize=(8, 5))
-                
-                ax2.barh(activity_data['Activity'], activity_data['Count'], color='#8b5cf6')
-                ax2.set_xlabel('Alert Count', fontsize=12)
-                ax2.set_ylabel('Activity', fontsize=12)
-                ax2.set_title('Top 10 Activities with Alerts', fontsize=14, fontweight='bold')
-                ax2.grid(True, alpha=0.3, axis='x')
-                
-                st.pyplot(fig2)
-            
-            st.divider()
-            
-            # Alert type breakdown
-            st.subheader("📋 Alert Types")
-            
-            type_data = pd.DataFrame({
-                'Alert Type': list(stats['type_breakdown'].keys()),
-                'Count': list(stats['type_breakdown'].values())
-            }).sort_values('Count', ascending=False)
-            
-            col1, col2 = st.columns([2, 1])
-            
-            with col1:
-                st.bar_chart(type_data.set_index('Alert Type'))
-            
-            with col2:
-                for _, row in type_data.iterrows():
-                    st.metric(row['Alert Type'].replace('_', ' ').title(), row['Count'])
-            
-            st.divider()
-            
-            # Recent alerts table
-            st.subheader("🕐 Recent Alerts")
-            
-            num_recent = st.slider("Number of recent alerts to display:", 5, 50, 20)
-            recent_alerts = alert_system.get_recent_alerts(n=num_recent)
-            
-            if not recent_alerts.empty:
-                # Add filter options
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    severity_filter = st.multiselect(
-                        "Filter by Severity:",
-                        options=recent_alerts['severity'].unique(),
-                        default=recent_alerts['severity'].unique()
-                    )
-                
-                with col2:
-                    type_filter = st.multiselect(
-                        "Filter by Type:",
-                        options=recent_alerts['alert_type'].unique(),
-                        default=recent_alerts['alert_type'].unique()
-                    )
-                
-                # Apply filters
-                filtered_alerts = recent_alerts[
-                    (recent_alerts['severity'].isin(severity_filter)) &
-                    (recent_alerts['alert_type'].isin(type_filter))
-                ]
-                
-                # Display table
-                display_columns = ['timestamp', 'severity', 'alert_type', 'activity', 
-                                  'risk_score', 'message']
-                
-                st.dataframe(
-                    filtered_alerts[display_columns],
-                    use_container_width=True,
-                    height=400
-                )
-                
-                st.caption(f"Showing {len(filtered_alerts)} of {len(recent_alerts)} recent alerts")
-                
-                # Export option
-                if st.button("📥 Export All Alerts to CSV"):
-                    all_alerts = pd.read_csv(alert_system.alert_log_file)
-                    csv = all_alerts.to_csv(index=False)
-                    st.download_button(
-                        label="Download CSV",
-                        data=csv,
-                        file_name="safety_alerts_export.csv",
-                        mime="text/csv"
-                    )
-            else:
-                st.info("No recent alerts to display")
+        # Option to view historical alerts
+        st.divider()
+        st.subheader("📜 Historical Alerts (Previous Sessions)")
+        
+        if Path(alert_system.alert_log_file).exists():
+            if st.checkbox("Show historical alerts from log file"):
+                historical_alerts = pd.read_csv(alert_system.alert_log_file)
+                st.dataframe(historical_alerts.tail(50), use_container_width=True, height=300)
+                st.caption(f"Showing last 50 of {len(historical_alerts)} historical alerts")
         else:
-            st.info("No alerts found in the log file")
+            st.info("No historical alert log file found")
+    else:
+        # Convert session alerts to DataFrame for analysis
+        df_alerts = pd.DataFrame(st.session_state.current_session_alerts)
+        
+        # Calculate statistics
+        total_alerts = len(df_alerts)
+        emergency_count = len(df_alerts[df_alerts['severity'] == 'EMERGENCY'])
+        critical_count = len(df_alerts[df_alerts['severity'] == 'CRITICAL'])
+        warning_count = len(df_alerts[df_alerts['severity'] == 'WARNING'])
+        info_count = len(df_alerts[df_alerts['severity'] == 'INFO'])
+        avg_risk = df_alerts['risk_score'].mean() if total_alerts > 0 else 0
+        
+        # Top metrics
+        st.subheader("📊 Current Session Overview")
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        with col1:
+            st.metric("📢 Total Alerts", total_alerts)
+        
+        with col2:
+            st.metric("🚨 Emergencies", emergency_count)
+        
+        with col3:
+            st.metric("🔴 Critical", critical_count)
+        
+        with col4:
+            st.metric("⚡ Avg Risk", f"{avg_risk:.1f}/100")
+        
+        with col5:
+            st.metric("📊 Samples", st.session_state.current_session_samples)
+        
+        st.divider()
+        
+        # Visualizations
+        col_left, col_right = st.columns(2)
+        
+        with col_left:
+            st.subheader("📊 Alerts by Severity")
+            
+            severity_counts = df_alerts['severity'].value_counts()
+            severity_data = pd.DataFrame({
+                'Severity': severity_counts.index,
+                'Count': severity_counts.values
+            })
+            
+            fig1, ax1 = plt.subplots(figsize=(8, 5))
+            
+            colors_map = {
+                'INFO': '#3b82f6',
+                'WARNING': '#f59e0b',
+                'CRITICAL': '#ef4444',
+                'EMERGENCY': '#991b1b'
+            }
+            
+            bar_colors = [colors_map.get(s, '#6b7280') for s in severity_data['Severity']]
+            bars = ax1.bar(severity_data['Severity'], severity_data['Count'], 
+                          color=bar_colors, edgecolor='black', linewidth=1.5)
+            
+            for bar in bars:
+                height = bar.get_height()
+                ax1.text(bar.get_x() + bar.get_width()/2., height,
+                        f'{int(height)}',
+                        ha='center', va='bottom', fontsize=12, fontweight='bold')
+            
+            ax1.set_xlabel('Severity Level', fontsize=12)
+            ax1.set_ylabel('Count', fontsize=12)
+            ax1.set_title('Alert Distribution by Severity', fontsize=14, fontweight='bold')
+            ax1.grid(True, alpha=0.3, axis='y')
+            plt.xticks(rotation=0)
+            
+            st.pyplot(fig1)
+        
+        with col_right:
+            st.subheader("🎯 Alerts by Activity")
+            
+            activity_counts = df_alerts['activity'].value_counts().head(10)
+            activity_data = pd.DataFrame({
+                'Activity': activity_counts.index,
+                'Count': activity_counts.values
+            })
+            
+            fig2, ax2 = plt.subplots(figsize=(8, 5))
+            
+            ax2.barh(activity_data['Activity'], activity_data['Count'], color='#8b5cf6')
+            ax2.set_xlabel('Alert Count', fontsize=12)
+            ax2.set_ylabel('Activity', fontsize=12)
+            ax2.set_title('Top 10 Activities with Alerts', fontsize=14, fontweight='bold')
+            ax2.grid(True, alpha=0.3, axis='x')
+            
+            st.pyplot(fig2)
+        
+        st.divider()
+        
+        # Alert type breakdown
+        st.subheader("📋 Alert Types")
+        
+        type_counts = df_alerts['alert_type'].value_counts()
+        type_data = pd.DataFrame({
+            'Alert Type': type_counts.index,
+            'Count': type_counts.values
+        })
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.bar_chart(type_data.set_index('Alert Type'))
+        
+        with col2:
+            for _, row in type_data.iterrows():
+                st.metric(row['Alert Type'].replace('_', ' ').title(), row['Count'])
+        
+        st.divider()
+        
+        # Recent alerts table
+        st.subheader("🕐 Recent Alerts from Current Session")
+        
+        num_recent = st.slider("Number of alerts to display:", 5, min(50, total_alerts), min(20, total_alerts))
+        
+        # Add filter options
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            severity_filter = st.multiselect(
+                "Filter by Severity:",
+                options=df_alerts['severity'].unique(),
+                default=df_alerts['severity'].unique()
+            )
+        
+        with col2:
+            type_filter = st.multiselect(
+                "Filter by Type:",
+                options=df_alerts['alert_type'].unique(),
+                default=df_alerts['alert_type'].unique()
+            )
+        
+        # Apply filters
+        filtered_alerts = df_alerts[
+            (df_alerts['severity'].isin(severity_filter)) &
+            (df_alerts['alert_type'].isin(type_filter))
+        ].tail(num_recent)
+        
+        # Display table
+        display_columns = ['timestamp', 'severity', 'alert_type', 'activity', 
+                          'risk_score', 'message']
+        
+        st.dataframe(
+            filtered_alerts[display_columns],
+            use_container_width=True,
+            height=400
+        )
+        
+        st.caption(f"Showing {len(filtered_alerts)} of {total_alerts} alerts from current simulation")
+        
+        # Export option
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("📥 Export Current Session Alerts to CSV"):
+                csv = df_alerts.to_csv(index=False)
+                st.download_button(
+                    label="Download CSV",
+                    data=csv,
+                    file_name=f"session_alerts_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+        
+        with col2:
+            if st.button("💾 Save All Session Alerts to Historical Log"):
+                for alert in st.session_state.current_session_alerts:
+                    alert_system.save_alert_to_log(alert)
+                st.success(f"✅ Saved {total_alerts} alerts to historical log!")
+        
+        # ====================================
+        # NOTIFICATION PANEL
+        # ====================================
+        st.divider()
+        st.subheader("🔔 System Notifications")
+        
+        # Calculate critical/emergency alert percentage based on samples
+        total_samples = st.session_state.current_session_samples
+        critical_emergency_count = emergency_count + critical_count
+        critical_percentage = (critical_emergency_count / total_samples * 100) if total_samples > 0 else 0
+        
+        # Define threshold
+        CRITICAL_THRESHOLD = 10.0
+        
+        # Display notification panel
+        st.markdown("""
+        <style>
+            .notification-panel {
+                padding: 1.5rem;
+                border-radius: 10px;
+                margin: 1rem 0;
+                border-left: 5px solid;
+            }
+            .notification-critical {
+                background-color: #fee2e2;
+                border-left-color: #dc2626;
+            }
+            .notification-safe {
+                background-color: #dcfce7;
+                border-left-color: #16a34a;
+            }
+        </style>
+        """, unsafe_allow_html=True)
+        
+        if critical_percentage > CRITICAL_THRESHOLD:
+            # Critical notification
+            st.markdown(f"""
+            <div class="notification-panel notification-critical">
+                <h3 style="color: #991b1b; margin-top: 0;">🚨 CRITICAL ALERT THRESHOLD EXCEEDED</h3>
+                <p style="color: #7f1d1d; font-size: 1.1rem; margin: 0.5rem 0;">
+                    <strong>Warning:</strong> Critical and Emergency alerts have exceeded the 10% threshold!
+                </p>
+                <p style="color: #7f1d1d; margin: 0.5rem 0;">
+                    • <strong>Current Level:</strong> {critical_percentage:.2f}% ({critical_emergency_count} critical/emergency alerts out of {total_samples} samples)
+                </p>
+                <p style="color: #7f1d1d; margin: 0.5rem 0;">
+                    • <strong>Threshold:</strong> {CRITICAL_THRESHOLD}% of samples
+                </p>
+                <p style="color: #7f1d1d; margin: 0.5rem 0;">
+                    • <strong>Recommended Action:</strong> Review safety protocols and increase monitoring frequency
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Additional visual indicator
+            st.error(f"⚠️ **ATTENTION REQUIRED**: {critical_emergency_count} CRITICAL/EMERGENCY alerts in {total_samples} samples ({critical_percentage:.2f}% - Threshold: {CRITICAL_THRESHOLD}%)")
+            
+            # Progress bar showing severity
+            st.progress(min(critical_percentage / 100, 1.0))
+            
+        else:
+            # Safe notification
+            st.markdown(f"""
+            <div class="notification-panel notification-safe">
+                <h3 style="color: #166534; margin-top: 0;">✅ SYSTEM STATUS NORMAL</h3>
+                <p style="color: #14532d; font-size: 1.1rem; margin: 0.5rem 0;">
+                    Critical and Emergency alerts are within acceptable limits.
+                </p>
+                <p style="color: #14532d; margin: 0.5rem 0;">
+                    • <strong>Current Level:</strong> {critical_percentage:.2f}% ({critical_emergency_count} critical/emergency alerts out of {total_samples} samples)
+                </p>
+                <p style="color: #14532d; margin: 0.5rem 0;">
+                    • <strong>Threshold:</strong> {CRITICAL_THRESHOLD}% of samples
+                </p>
+                <p style="color: #14532d; margin: 0.5rem 0;">
+                    • <strong>Status:</strong> Continue regular monitoring
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.success(f"✓ System operating normally - {critical_percentage:.2f}% critical/emergency rate (Below {CRITICAL_THRESHOLD}% threshold)")
+            
+            # Progress bar showing current level
+            st.progress(critical_percentage / 100)
+        
+        # Summary metrics for notification panel
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "Critical/Emergency %",
+                f"{critical_percentage:.2f}%",
+                delta=f"{critical_percentage - CRITICAL_THRESHOLD:.2f}%",
+                delta_color="inverse"
+            )
+        
+        with col2:
+            st.metric("Threshold", f"{CRITICAL_THRESHOLD}%")
+        
+        with col3:
+            status = "🔴 EXCEEDED" if critical_percentage > CRITICAL_THRESHOLD else "🟢 NORMAL"
+            st.metric("Status", status)
+        
+        with col4:
+            remaining = max(0, CRITICAL_THRESHOLD - critical_percentage)
+            st.metric("Margin", f"{remaining:.2f}%")
+
 
 
 
